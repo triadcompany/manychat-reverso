@@ -71,3 +71,25 @@ export async function handleInbound(channel: Channel, contact: Contact, inbound:
     return; // só o primeiro fluxo que casa
   }
 }
+
+/** Retoma execuções cuja espera venceu. Chamado periodicamente pelo servidor. */
+export async function resumeDue() {
+  const due = await prisma.flowRun.findMany({
+    where: { status: "WAITING", resumeAt: { lte: new Date() } },
+    include: { flow: true, contact: true, channel: true }, take: 50,
+  });
+  for (const run of due) {
+    // Marca como ACTIVE antes de executar para outro tick não pegar a mesma execução.
+    const claimed = await prisma.flowRun.updateMany({ where: { id: run.id, status: "WAITING" }, data: { status: "ACTIVE" } });
+    if (claimed.count === 0 || !run.nodeId) continue;
+    const tags = (await prisma.contactTag.findMany({ where: { contactId: run.contactId }, include: { tag: true } })).map((t) => t.tag.name);
+    try {
+      const res = await runFrom(run.flow.graph as unknown as FlowGraph, run.nodeId,
+        { tags, fields: run.contact.fields as Record<string, string> }, buildEffects(run.channel, run.contact, { kind: "dm", text: "" }));
+      await prisma.flowRun.update({ where: { id: run.id }, data: res.status === "waiting"
+        ? { status: "WAITING", nodeId: res.nodeId, resumeAt: res.resumeAt } : { status: "DONE", nodeId: null, resumeAt: null } });
+    } catch (err) {
+      await prisma.flowRun.update({ where: { id: run.id }, data: { status: "FAILED", context: { error: String(err) } } });
+    }
+  }
+}
