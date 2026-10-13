@@ -1,0 +1,159 @@
+// Toda tabela deste banco precisa ser um model aqui: `prisma db push` roda a cada
+// start do container e apaga qualquer tabela que não esteja declarada.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ChannelType {
+  INSTAGRAM
+  WHATSAPP
+}
+
+enum FlowStatus {
+  DRAFT
+  LIVE
+  PAUSED
+}
+
+enum RunStatus {
+  ACTIVE
+  WAITING
+  DONE
+  FAILED
+}
+
+model Channel {
+  id          String      @id @default(cuid())
+  type        ChannelType
+  name        String
+  // Instagram: user_id devolvido pela TROCA do code (não /me?fields=id) — é o que vem em entry[].id nos webhooks.
+  // WhatsApp: nome da instância na Evolution API.
+  externalId  String
+  accessToken String?
+  config      Json        @default("{}")
+  active      Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+
+  contacts Contact[]
+  runs     FlowRun[]
+
+  @@unique([type, externalId])
+  @@map("channels")
+}
+
+model Contact {
+  id           String   @id @default(cuid())
+  channelId    String
+  // Instagram-scoped ID ou telefone E.164 (só dígitos) conforme o canal.
+  externalId   String
+  name         String?
+  username     String?
+  fields       Json     @default("{}")
+  subscribed   Boolean  @default(true)
+  lastSeenAt   DateTime @default(now())
+  createdAt    DateTime @default(now())
+
+  channel  Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  tags     ContactTag[]
+  runs     FlowRun[]
+  messages Message[]
+
+  @@unique([channelId, externalId])
+  @@map("contacts")
+}
+
+model Tag {
+  id        String       @id @default(cuid())
+  name      String       @unique
+  createdAt DateTime     @default(now())
+  contacts  ContactTag[]
+
+  @@map("tags")
+}
+
+model ContactTag {
+  contactId String
+  tagId     String
+  createdAt DateTime @default(now())
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tag     Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([contactId, tagId])
+  @@map("contact_tags")
+}
+
+model CustomField {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  label     String
+  type      String   @default("text") // text | number | boolean | date
+  createdAt DateTime @default(now())
+
+  @@map("custom_fields")
+}
+
+model Flow {
+  id            String     @id @default(cuid())
+  name          String
+  status        FlowStatus @default(DRAFT)
+  // Gatilho resumido para consulta rápida; o grafo completo fica em `graph`.
+  triggerType   String?
+  triggerConfig Json       @default("{}")
+  graph         Json       @default("{\"nodes\":[],\"edges\":[]}")
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  runs FlowRun[]
+
+  @@map("flows")
+}
+
+model FlowRun {
+  id        String    @id @default(cuid())
+  flowId    String
+  contactId String
+  channelId String
+  status    RunStatus @default(ACTIVE)
+  // Nó em que a execução parou (aguardando resposta/espera).
+  nodeId    String?
+  resumeAt  DateTime?
+  context   Json      @default("{}")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  flow    Flow    @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@index([contactId, status])
+  @@map("flow_runs")
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  contactId String
+  direction String // in | out
+  body      Json
+  createdAt DateTime @default(now())
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@index([contactId, createdAt])
+  @@map("messages")
+}
+
+// Deduplicação: a Meta e a Evolution reenviam webhooks.
+model WebhookEvent {
+  id        String   @id
+  source    String
+  createdAt DateTime @default(now())
+
+  @@map("webhook_events")
+}
